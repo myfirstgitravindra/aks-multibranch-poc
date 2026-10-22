@@ -1,0 +1,47 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: poc-app
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: poc-app
+  template:
+    metadata:
+      labels:
+        app: poc-app
+    spec:
+      containers:
+        - name: poc-app
+          image: IMAGE_PLACEHOLDER
+          ports:
+            - containerPort: 3000
+          env:
+            - name: APP_ENV
+              value: ENV_PLACEHOLDER
+            - name: APP_VERSION
+              value: VERSION_PLACEHOLDER
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 3000
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: poc-svc
+spec:
+  type: LoadBalancer
+  selector:
+    app: poc-app
+  ports:
+    - port: 80
+      targetPort: 3000
