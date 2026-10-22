@@ -1,0 +1,105 @@
+name: AKS Multibranch CI/CD
+
+on:
+  push:
+    branches:
+      - main
+      - "feature/**"
+  pull_request:
+    branches:
+      - main
+      - "feature/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  ACR_NAME: ${{ vars.ACR_NAME }}
+  IMAGE_NAME: poc-app
+
+jobs:
+  test:
+    name: Test application
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - name: Install dependencies
+        working-directory: app
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci
+          else
+            npm install
+          fi
+
+      - name: Run tests
+        working-directory: app
+        run: npm test
+
+  build-and-deploy:
+    name: Build, push, and deploy to AKS
+    needs: test
+    # Do not deploy pull requests; deploy only after a push to a branch.
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    environment: ${{ github.ref_name == 'main' && 'production' || 'development' }}
+    env:
+      NAMESPACE: ${{ github.ref_name == 'main' && 'prod-ns' || 'dev-ns' }}
+      APP_ENV: ${{ github.ref_name == 'main' && 'production' || 'development' }}
+      IMAGE_TAG: ${{ github.sha }}
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Azure login using GitHub OIDC
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Log in to Azure Container Registry
+        run: az acr login --name "$ACR_NAME"
+
+      - name: Build and push image
+        run: |
+          IMAGE="${ACR_NAME}.azurecr.io/${IMAGE_NAME}:${IMAGE_TAG}"
+          docker build -t "$IMAGE" ./app
+          docker push "$IMAGE"
+          echo "IMAGE=$IMAGE" >> "$GITHUB_ENV"
+
+      - name: Set AKS credentials
+        run: |
+          az aks get-credentials \
+            --resource-group rg-aks-multibranch-poc \
+            --name aks-multibranch-poc \
+            --overwrite-existing
+
+      - name: Configure kubelogin for Azure CLI
+        run: kubelogin convert-kubeconfig -l azurecli
+
+      - name: Render Kubernetes manifest
+        run: |
+          sed \
+            -e "s|IMAGE_PLACEHOLDER|${IMAGE}|g" \
+            -e "s|ENV_PLACEHOLDER|${APP_ENV}|g" \
+            -e "s|VERSION_PLACEHOLDER|${IMAGE_TAG}|g" \
+            k8s/deployment.yaml > /tmp/deployment-rendered.yaml
+
+      - name: Deploy to namespace
+        run: |
+          kubectl apply -n "$NAMESPACE" -f /tmp/deployment-rendered.yaml
+          kubectl rollout status deployment/poc-app -n "$NAMESPACE" --timeout=180s
+          kubectl get deployments,services -n "$NAMESPACE"
